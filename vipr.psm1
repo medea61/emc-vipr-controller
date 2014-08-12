@@ -1,6 +1,7 @@
 <#
     PowerShell wrapper for EMC ViPR controller
     (c) Parul Jain paruljain@hotmail.com
+    Verison 0.2
     MIT License
 #>
 
@@ -21,6 +22,8 @@ function Vipr-Login {
     )
     $viprApi.BaseAddress = $viprApiUri
     $viprApi.Headers.Clear()
+    $viprApi.QueryString.Clear()
+
     $viprApi.Headers.Add('Authorization', 'Basic ' + [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($user + ':' + $password)))
     [void]$viprApi.DownloadString('login')
     $script:viprToken = $viprApi.ResponseHeaders['X-SDS-AUTH-TOKEN']
@@ -30,13 +33,15 @@ function Vipr-Login {
 function Vipr-GetHosts {
     $tenantId = (Vipr-GetTenant).id
     $viprApi.Headers.Clear()
+    $viprApi.QueryString.Clear()
+
     $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
 
     $response = [xml]$viprApi.DownloadString("tenants/$tenantId/hosts")
 
     foreach ($h in $response.hosts.host) {
         @{
-            name = $h.name;
+            name = $h.name
             id = $h.id
         }
     }
@@ -45,44 +50,109 @@ function Vipr-GetHosts {
 function Vipr-GetTenant {
     if (!$script:viprToken) { throw 'Must login to Vipr first' }
     $viprApi.Headers.Clear()
+    $viprApi.QueryString.Clear()
+
     $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
     $response = [xml]$viprApi.DownloadString('tenant')
     @{
-        name = $response.tenant_info.name;
+        name = $response.tenant_info.name
         id = $response.tenant_info.id
     }
 }
 
-function Vipr-AddHost ([string]$hostname, [string]$type = 'Other') {
+function Vipr-AddHost {
+
+    param(
+        [Parameter(Mandatory=$true)][string]$hostname,
+        [Parameter(Mandatory=$true)][ValidateSet('Other', 'Windows', 'Linux', 'HPUX', 'Esx')][string]$type
+
+    )
     if (!$script:viprToken) { throw 'Must login to Vipr first' }
+
+    $found = Vipr-SearchHost -hostName $hostname
+    if ($found) { throw "Host $hostname is already there" }
+
     $tenantId = $script:tenantId
     $hostSpec = @{
-        type = $type;
-        host_name = $hostname;
-        name = $hostname;
+        type = $type
+        host_name = $hostname
+        name = $hostname
         discoverable = $false
     }
     $viprApi.Headers.Clear()
+    $viprApi.QueryString.Clear()
+
     $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
     $viprApi.Headers.Add('Content-Type', 'application/json')
-    $response = [xml]$viprApi.UploadString("tenants/$tenantId/hosts", ($hostSpec | ConvertTo-Json))
+    try { $response = [xml]$viprApi.UploadString("tenants/$tenantId/hosts", ($hostSpec | ConvertTo-Json)) }
+    catch { throw 'Unable to add host, perhaps the hostname is already used in another tenant?' }
     @{
-        name = $response.task.resource.name;
-        id = $response.task.resource.id;
+        name = $response.task.resource.name
+        id = $response.task.resource.id
     }
 }
 
-function Vipr-AddInitiator ([string]$hostId, [string]$portWwn, [string]$nodeWwn) {
+function Vipr-AddInitiator ([Parameter(Mandatory=$true)][string]$hostId, [Parameter(Mandatory=$true)][string]$portWwn, [string]$nodeWwn) {
     if (!$script:viprToken) { throw 'Must login to Vipr first' }
+    $found = Vipr-SearchInitiator -portWwn $portWwn
+    if ($found) { throw 'Initiator ' + $portWwn + ' is already attached to host ' + $found.hostname }
+
     if (!$nodeWwn) { $nodeWwn = $portWwn }
     $initiatorSpec = @{
         protocol = 'FC';
-        initiator_port = $portWwn;
+        initiator_port = $portWwn
         initiator_node = $nodeWwn
     }
     $viprApi.Headers.Clear()
+    $viprApi.QueryString.Clear()
+
     $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
     $viprApi.Headers.Add('Content-Type', 'application/json')
     [void]$viprApi.UploadString("/compute/hosts/$hostId/initiators", ($initiatorSpec | ConvertTo-Json))
 }
 
+function Vipr-SearchHost ([Parameter(Mandatory=$true)][string]$hostName) {
+    if (!$script:viprToken) { throw 'Must login to Vipr first' }
+    $viprApi.Headers.Clear()
+    $viprApi.QueryString.Clear()
+
+    $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
+    $viprApi.QueryString.Clear()
+    $viprApi.QueryString.Add('name', $hostname)
+    $result = ([xml]$viprApi.DownloadString('compute/hosts/search')).results.resource.id
+    if ($result) { $result }
+}
+
+function Vipr-SearchInitiator ([Parameter(Mandatory=$true)][string]$portWwn) {
+    if (!$script:viprToken) { throw 'Must login to Vipr first' }
+    $viprApi.Headers.Clear()
+    $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
+    $viprApi.QueryString.Clear()
+    $viprApi.QueryString.Add('initiator_port', $portWwn)
+    $initiatorId = ([xml]$viprApi.DownloadString('compute/initiators/search')).results.resource.id
+    if (!$initiatorId) { return }
+    $viprApi.Headers.Clear()
+    $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
+    $viprApi.QueryString.Clear()
+    $result = [xml]$viprApi.DownloadString("compute/initiators/$initiatorId")
+    @{
+        hostname = $result.initiator.hostname
+        hostId = $result.initiator.host.id
+        initiatorId = $result.initiator.id
+        registrationStatus = $result.initiator.registration_status
+    }
+}
+
+function Vipr-GetHostInitiators ([Parameter(Mandatory=$true)][string]$hostId) {
+    if (!$script:viprToken) { throw 'Must login to Vipr first' }
+    $viprApi.Headers.Clear()
+    $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
+    $viprApi.QueryString.Clear()
+    $result = [xml]$viprApi.DownloadString("compute/hosts/$hostId/initiators")
+    $result.initiators.initiator | % {
+        @{
+            portWwn = $_.name
+            id = $_.id
+        }
+    }
+}

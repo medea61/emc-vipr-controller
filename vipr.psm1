@@ -1,7 +1,7 @@
 <#
     PowerShell wrapper for EMC ViPR controller
     (c) Parul Jain paruljain@hotmail.com
-    Verison 0.3
+    Verison 0.4
     MIT License
 #>
 
@@ -15,18 +15,21 @@ $viprApi = New-Object System.Net.WebClient
 function Vipr-PostJson {
     param(
         [Parameter(Mandatory=$true)][string]$location,
-        [Parameter(Mandatory=$true)][string]$jsonString
+        [Parameter(Mandatory=$true)][hashtable]$payload
     )
 
     if (!$script:viprToken) { throw 'Must login to Vipr first' }
+    if ($payload.Keys.Count -eq 0) { throw 'No payload' }
+
     $viprApi.Headers.Clear()
     $viprApi.QueryString.Clear()
     $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
     $viprApi.Headers.Add('Content-Type', 'application/json')
-    try { $result = [xml]$viprApi.UploadString($location, $jsonString) }
+    $viprApi.Headers.Add('Accept', 'application/json')
+    try { $result = $viprApi.UploadString($location, ($payload | ConvertTo-Json)) | ConvertFrom-Json }
     catch [System.Net.WebException] {
-        $errorMsg = [xml](New-Object System.IO.StreamReader $_.Exception.Response.GetResponseStream()).ReadToEnd()
-        throw $errorMsg.error.details
+        $errorMsg = (New-Object System.IO.StreamReader $_.Exception.Response.GetResponseStream()).ReadToEnd() | ConvertFrom-Json
+        throw $errorMsg.details
     }
     $result
 }
@@ -41,16 +44,17 @@ function Vipr-Get {
     $viprApi.Headers.Clear()
     $viprApi.QueryString.Clear()
     $viprApi.Headers.Add('X-SDS-AUTH-TOKEN', $script:viprToken)
+    $viprApi.Headers.Add('Accept', 'application/json')
     if ($queryParams.Keys.Count -gt 0) {
         $queryParams.GetEnumerator() | % {
             $viprApi.QueryString.Add($_.Name, $_.Value)
         }
     }
 
-    try { $result = [xml]$viprApi.DownloadString($location) }
+    try { $result = $viprApi.DownloadString($location) | ConvertFrom-Json }
     catch [System.Net.WebException] {
-        $errorMsg = [xml](New-Object System.IO.StreamReader $_.Exception.Response.GetResponseStream()).ReadToEnd()
-        throw $errorMsg.error.details
+        $errorMsg = (New-Object System.IO.StreamReader $_.Exception.Response.GetResponseStream()).ReadToEnd() | ConvertFrom-Json
+        throw $errorMsg.details
     }
     $result
 }
@@ -77,17 +81,11 @@ function Vipr-Login {
 }
 
 function Vipr-GetHosts {
-    (Vipr-Get ('/tenants/' + $script:tenantId + '/hosts')).hosts.host | % {
-        @{name = $_.name; id = $_.id}
-    }
+    (Vipr-Get ('/tenants/' + $script:tenantId + '/hosts')).host
 }
 
 function Vipr-GetTenant {
-    $response = Vipr-Get '/tenant'
-    @{
-        name = $response.tenant_info.name
-        id = $response.tenant_info.id
-    }
+    Vipr-Get '/tenant'
 }
 
 function Vipr-AddHost {
@@ -102,11 +100,7 @@ function Vipr-AddHost {
         name = $hostname
         discoverable = $false
     }
-    $response = Vipr-PostJson ('/tenants/' + $script:tenantId + '/hosts') ($hostSpec | ConvertTo-Json)
-    @{
-        name = $response.task.resource.name
-        id = $response.task.resource.id
-    }
+    (Vipr-PostJson ('/tenants/' + $script:tenantId + '/hosts') $hostSpec).resource
 }
 
 function Vipr-AddInitiator {
@@ -119,31 +113,66 @@ function Vipr-AddInitiator {
     if ($found) { throw 'Initiator ' + $portWwn + ' is already attached to host ' + $found.hostname }
 
     $initiatorSpec = @{
-        protocol = 'FC';
+        protocol = 'FC'
         initiator_port = $portWwn
         initiator_node = $nodeWwn
     }
-    Vipr-PostJson "/compute/hosts/$hostId/initiators" ($initiatorSpec | ConvertTo-Json)
+    Vipr-PostJson "/compute/hosts/$hostId/initiators" $initiatorSpec
 }
 
 function Vipr-SearchHost ([Parameter(Mandatory=$true)][string]$hostName) {
-    (Vipr-Get '/compute/hosts/search' @{name = $hostName}).results.resource.id
+    (Vipr-Get '/compute/hosts/search' @{name = $hostName}).resource
 }
 
 function Vipr-SearchInitiator ([Parameter(Mandatory=$true)][string]$portWwn) {
-    $initiatorId = (Vipr-Get 'compute/initiators/search' @{initiator_port = $portWwn}).results.resource.id
+    $initiatorId = (Vipr-Get 'compute/initiators/search' @{initiator_port = $portWwn}).resource.id
     if (!$initiatorId) { return }
-    $result = Vipr-Get "compute/initiators/$initiatorId"
-    @{
-        hostname = $result.initiator.hostname
-        hostId = $result.initiator.host.id
-        initiatorId = $result.initiator.id
-        registrationStatus = $result.initiator.registration_status
-    }
+    Vipr-Get "/compute/initiators/$initiatorId"
 }
 
 function Vipr-GetHostInitiators ([Parameter(Mandatory=$true)][string]$hostId) {
-    (Vipr-Get "/compute/hosts/$hostId/initiators").initiators.initiator | % {
-        @{ portWwn = $_.name; id = $_.id }
+    (Vipr-Get "/compute/hosts/$hostId/initiators").initiator
+}
+
+function Vipr-AddCluster {
+    param(
+        [Parameter(Mandatory=$true)][string]$clusterName
+    )
+    Vipr-PostJson ('/tenants/' + $script:tenantId + '/clusters') @{name=$clusterName}
+}
+
+function Vipr-AddClusterHost {
+    param(
+        [Parameter(Mandatory=$true)][string]$hostname,
+        [Parameter(Mandatory=$true)][ValidateSet('Other', 'Windows', 'Linux', 'HPUX', 'Esx')][string]$type,
+        [Parameter(Mandatory=$true)][string]$clusterId
+    )
+    $hostSpec = @{
+        type = $type
+        host_name = $hostname
+        name = $hostname
+        discoverable = $false
+        cluster = $clusterId
     }
+    (Vipr-PostJson ('/tenants/' + $script:tenantId + '/hosts') $hostSpec).resource
+}
+
+function Vipr-GetClusters {
+    (Vipr-Get ('/tenants/' + $script:tenantId + '/clusters')).cluster
+}
+
+function Vipr-GetClusterHosts {
+    param(
+        [Parameter(Mandatory=$true)][string]$clusterId
+    )
+
+    (Vipr-Get "/compute/clusters/$clusterId/hosts").host
+}
+
+function Vipr-GetHostDetails {
+   param(
+        [Parameter(Mandatory=$true)][string]$hostId
+    )
+
+    Vipr-Get "/compute/hosts/$hostId"
 }

@@ -3,7 +3,7 @@ PowerShell Wrapper for EMC ViPR Controller
 
 Usage
 -----
-1. You need PowerShell 2.0 or better
+1. Needs PowerShell 3.0 or better
 
 2. Enable execution of PowerShell scripts by starting an administratively privileged command prompt and issuing:
 
@@ -19,3 +19,4 @@ Usage
         Vipr-GetTenant
         Vipr-AddHost -hostname myHostname -type Windows
         Vipr-AddInitiator -hostId myHostId -portWwn 10:00:00:00:11:22:33:44
+        Etc.
